@@ -1,21 +1,24 @@
+"""
+Bluestock Mutual Fund Database Loader.
+
+Loads cleaned CSV datasets from Data/processed into the
+Bluestock Mutual Fund SQLite database.
+"""
+
 import sqlite3
-import pandas as pd
 from pathlib import Path
 
-# Project root directory
-BASE_DIR = Path(__file__).resolve().parent.parent
+import pandas as pd
 
-# Database path
-DB_PATH = BASE_DIR / "bluestock_mf.db"
 
-# Processed data folder
-PROCESSED_DIR = BASE_DIR / "Data" / "processed"
+# Project paths
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATABASE_PATH = PROJECT_ROOT / "bluestock_mf.db"
+PROCESSED_DATA_FOLDER = PROJECT_ROOT / "Data" / "processed"
 
-# Connect to SQLite database
-conn = sqlite3.connect(DB_PATH)
 
-# Mapping of table names to processed CSV files
-datasets = {
+# Mapping of SQLite table names to processed CSV files
+DATASETS = {
     "fund_master": "clean_fund_master.csv",
     "nav_history": "clean_nav.csv",
     "aum_by_fund_house": "clean_aum.csv",
@@ -25,36 +28,115 @@ datasets = {
     "scheme_performance": "clean_performance.csv",
     "investor_transactions": "clean_transactions.csv",
     "portfolio_holdings": "clean_portfolio_holdings.csv",
-    "benchmark_indices": "clean_benchmark_indices.csv"
+    "benchmark_indices": "clean_benchmark_indices.csv",
 }
 
-print("=" * 70)
-print("LOADING CLEANED DATASETS INTO SQLITE")
-print("=" * 70)
 
-for table_name, file_name in datasets.items():
+def load_dataset(
+    connection: sqlite3.Connection,
+    table_name: str,
+    file_name: str,
+) -> int:
+    """
+    Load a processed CSV file into a SQLite table.
 
-    file_path = PROCESSED_DIR / file_name
+    Parameters
+    ----------
+    connection : sqlite3.Connection
+        Active SQLite database connection.
 
-    if file_path.exists():
+    table_name : str
+        Destination SQLite table name.
 
-        df = pd.read_csv(file_path)
+    file_name : str
+        Name of the processed CSV file.
 
-        # Load data into SQLite
-        df.to_sql(
-            table_name,
-            conn,
-            if_exists="replace",
-            index=False
+    Returns
+    -------
+    int
+        Number of rows loaded.
+    """
+
+    file_path = PROCESSED_DATA_FOLDER / file_name
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Processed file not found: {file_path}"
         )
 
-        print(f"✅ {table_name:<30} Loaded ({len(df)} rows)")
+    dataframe = pd.read_csv(file_path)
 
-    else:
-        print(f"❌ Missing File : {file_name}")
+    dataframe.to_sql(
+        table_name,
+        connection,
+        if_exists="replace",
+        index=False,
+    )
 
-conn.close()
+    return len(dataframe)
 
-print("\n" + "=" * 70)
-print("ALL CLEANED DATASETS LOADED INTO SQLITE SUCCESSFULLY!")
-print("=" * 70)
+
+def load_all_datasets():
+    """Load all processed datasets into the SQLite database."""
+
+    if not PROCESSED_DATA_FOLDER.exists():
+        raise FileNotFoundError(
+            f"Processed data folder not found: "
+            f"{PROCESSED_DATA_FOLDER}"
+        )
+
+    connection = sqlite3.connect(DATABASE_PATH)
+
+    loaded_tables = 0
+    total_rows = 0
+
+    try:
+        for table_name, file_name in DATASETS.items():
+
+            try:
+                row_count = load_dataset(
+                    connection,
+                    table_name,
+                    file_name,
+                )
+
+                loaded_tables += 1
+                total_rows += row_count
+
+                print(
+                    f"✓ {table_name:<30} "
+                    f"{row_count:,} rows"
+                )
+
+            except FileNotFoundError as error:
+
+                print(f"✗ {error}")
+
+        connection.commit()
+
+    finally:
+        connection.close()
+
+    return loaded_tables, total_rows
+
+
+def main():
+    """Run the complete database loading process."""
+
+    print("Loading processed datasets into SQLite...")
+    print(f"Database: {DATABASE_PATH}")
+
+    loaded_tables, total_rows = load_all_datasets()
+
+    print(
+        f"\nCompleted: {loaded_tables}/{len(DATASETS)} "
+        f"tables loaded."
+    )
+
+    print(
+        f"Total rows loaded: {total_rows:,}"
+    )
+
+
+if __name__ == "__main__":
+    main()

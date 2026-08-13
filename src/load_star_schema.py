@@ -1,27 +1,95 @@
-import pandas as pd
-from sqlalchemy import create_engine
+"""
+Bluestock Mutual Fund Star Schema Loader.
+
+Creates dimension and fact tables in the SQLite database
+using the cleaned datasets from Data/processed.
+"""
+
 from pathlib import Path
 
-# ==========================================
-# Paths
-# ==========================================
+import pandas as pd
+from sqlalchemy import create_engine
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "Data" / "processed"
-DB_PATH = BASE_DIR / "bluestock_mf.db"
 
-engine = create_engine(f"sqlite:///{DB_PATH}")
+# ---------------------------------------------------------------------
+# Project paths
+# ---------------------------------------------------------------------
 
-print("Connected to SQLite Database")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROCESSED_DATA_FOLDER = PROJECT_ROOT / "Data" / "processed"
+DATABASE_PATH = PROJECT_ROOT / "bluestock_mf.db"
 
-# ==========================================
-# Load Dimension : Fund
-# ==========================================
 
-fund = pd.read_csv(DATA_DIR / "clean_fund_master.csv")
+def create_database_engine():
+    """Create and return a SQLAlchemy SQLite database engine."""
 
-dim_fund = fund[
-    [
+    return create_engine(
+        f"sqlite:///{DATABASE_PATH}"
+    )
+
+
+def load_csv(filename):
+    """
+    Load a processed CSV file.
+
+    Parameters
+    ----------
+    filename : str
+        Name of the CSV file in Data/processed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Loaded dataset.
+    """
+
+    file_path = PROCESSED_DATA_FOLDER / filename
+
+    if not file_path.exists():
+        raise FileNotFoundError(
+            f"Processed dataset not found: {file_path}"
+        )
+
+    return pd.read_csv(file_path)
+
+
+def load_table(dataframe, table_name, engine):
+    """
+    Load a DataFrame into a SQLite table.
+
+    Parameters
+    ----------
+    dataframe : pandas.DataFrame
+        Dataset to load.
+
+    table_name : str
+        Destination table name.
+
+    engine : sqlalchemy.Engine
+        Database engine.
+
+    Returns
+    -------
+    int
+        Number of rows loaded.
+    """
+
+    dataframe.to_sql(
+        table_name,
+        engine,
+        if_exists="replace",
+        index=False,
+    )
+
+    return len(dataframe)
+
+
+def create_dim_fund(engine):
+    """Create the fund dimension table."""
+
+    fund = load_csv("clean_fund_master.csv")
+
+    columns = [
         "amfi_code",
         "fund_house",
         "scheme_name",
@@ -36,194 +104,133 @@ dim_fund = fund[
         "fund_manager",
         "risk_category",
     ]
-].drop_duplicates()
 
-dim_fund.to_sql(
-    "dim_fund",
-    engine,
-    if_exists="replace",
-    index=False,
-)
+    dim_fund = (
+        fund[columns]
+        .drop_duplicates()
+    )
 
-print("✓ dim_fund loaded")
+    return load_table(
+        dim_fund,
+        "dim_fund",
+        engine,
+    )
 
-# ==========================================
-# Load Dimension : Date
-# ==========================================
 
-dates = []
+def create_dim_date(engine):
+    """Create the date dimension from all relevant date fields."""
 
-# NAV
-nav = pd.read_csv(DATA_DIR / "clean_nav.csv")
-dates.extend(pd.to_datetime(nav["date"]))
+    date_sources = [
+        ("clean_nav.csv", "date"),
+        ("clean_transactions.csv", "transaction_date"),
+        ("clean_aum.csv", "date"),
+        ("clean_benchmark_indices.csv", "date"),
+        ("clean_portfolio_holdings.csv", "portfolio_date"),
+        ("clean_monthly_sip.csv", "month"),
+        ("clean_category_inflows.csv", "month"),
+        ("clean_industry_folio.csv", "month"),
+    ]
 
-# Transactions
-txn = pd.read_csv(DATA_DIR / "clean_transactions.csv")
-dates.extend(pd.to_datetime(txn["transaction_date"]))
+    all_dates = []
 
-# AUM
-aum = pd.read_csv(DATA_DIR / "clean_aum.csv")
-dates.extend(pd.to_datetime(aum["date"]))
+    for filename, date_column in date_sources:
 
-# Benchmark
-benchmark = pd.read_csv(DATA_DIR / "clean_benchmark_indices.csv")
-dates.extend(pd.to_datetime(benchmark["date"]))
+        dataframe = load_csv(filename)
 
-# Portfolio
-portfolio = pd.read_csv(DATA_DIR / "clean_portfolio_holdings.csv")
-dates.extend(pd.to_datetime(portfolio["portfolio_date"]))
+        all_dates.extend(
+            pd.to_datetime(
+                dataframe[date_column],
+                errors="coerce",
+            )
+        )
 
-# Monthly SIP
-sip = pd.read_csv(DATA_DIR / "clean_monthly_sip.csv")
-dates.extend(pd.to_datetime(sip["month"]))
+    dates = (
+        pd.Series(all_dates)
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+        .reset_index(drop=True)
+    )
 
-# Category Inflow
-cat = pd.read_csv(DATA_DIR / "clean_category_inflows.csv")
-dates.extend(pd.to_datetime(cat["month"]))
+    dim_date = pd.DataFrame(
+        {
+            "full_date": dates,
+            "day": dates.dt.day,
+            "month": dates.dt.month,
+            "month_name": dates.dt.month_name(),
+            "quarter": dates.dt.quarter,
+            "year": dates.dt.year,
+        }
+    )
 
-# Industry Folio
-folio = pd.read_csv(DATA_DIR / "clean_industry_folio.csv")
-dates.extend(pd.to_datetime(folio["month"]))
+    return load_table(
+        dim_date,
+        "dim_date",
+        engine,
+    )
 
-dates = pd.Series(dates).drop_duplicates().sort_values()
 
-dim_date = pd.DataFrame()
+def create_fact_tables(engine):
+    """Create all fact tables used by the star schema."""
 
-dim_date["full_date"] = dates
-dim_date["day"] = dates.dt.day
-dim_date["month"] = dates.dt.month
-dim_date["month_name"] = dates.dt.month_name()
-dim_date["quarter"] = dates.dt.quarter
-dim_date["year"] = dates.dt.year
+    fact_datasets = {
+        "fact_nav": "clean_nav.csv",
+        "fact_transactions": "clean_transactions.csv",
+        "fact_performance": "clean_performance.csv",
+        "fact_aum": "clean_aum.csv",
+        "fact_sip_inflows": "clean_monthly_sip.csv",
+        "fact_category_inflows": "clean_category_inflows.csv",
+        "fact_folio_count": "clean_industry_folio.csv",
+        "fact_portfolio_holdings": "clean_portfolio_holdings.csv",
+        "fact_benchmark": "clean_benchmark_indices.csv",
+    }
 
-dim_date.to_sql(
-    "dim_date",
-    engine,
-    if_exists="replace",
-    index=False,
-)
+    results = {}
 
-print("✓ dim_date loaded")
+    for table_name, filename in fact_datasets.items():
 
-# ==========================================
-# FACT NAV
-# ==========================================
+        dataframe = load_csv(filename)
 
-nav.to_sql(
-    "fact_nav",
-    engine,
-    if_exists="replace",
-    index=False,
-)
+        results[table_name] = load_table(
+            dataframe,
+            table_name,
+            engine,
+        )
 
-print("✓ fact_nav loaded")
+    return results
 
-# ==========================================
-# FACT TRANSACTIONS
-# ==========================================
 
-txn.to_sql(
-    "fact_transactions",
-    engine,
-    if_exists="replace",
-    index=False,
-)
+def main():
+    """Build the complete Bluestock Mutual Fund star schema."""
 
-print("✓ fact_transactions loaded")
+    print("Loading Bluestock Mutual Fund star schema...")
+    print(f"Database: {DATABASE_PATH}")
 
-# ==========================================
-# FACT PERFORMANCE
-# ==========================================
+    engine = create_database_engine()
 
-performance = pd.read_csv(DATA_DIR / "clean_performance.csv")
+    # Dimension tables
+    dim_fund_rows = create_dim_fund(engine)
+    dim_date_rows = create_dim_date(engine)
 
-performance.to_sql(
-    "fact_performance",
-    engine,
-    if_exists="replace",
-    index=False,
-)
+    print(
+        f"✓ dim_fund loaded: {dim_fund_rows:,} rows"
+    )
 
-print("✓ fact_performance loaded")
+    print(
+        f"✓ dim_date loaded: {dim_date_rows:,} rows"
+    )
 
-# ==========================================
-# FACT AUM
-# ==========================================
+    # Fact tables
+    fact_results = create_fact_tables(engine)
 
-aum.to_sql(
-    "fact_aum",
-    engine,
-    if_exists="replace",
-    index=False,
-)
+    for table_name, row_count in fact_results.items():
+        print(
+            f"✓ {table_name:<25} "
+            f"{row_count:,} rows"
+        )
 
-print("✓ fact_aum loaded")
+    print("\nStar schema loaded successfully.")
 
-# ==========================================
-# FACT SIP INFLOWS
-# ==========================================
 
-sip.to_sql(
-    "fact_sip_inflows",
-    engine,
-    if_exists="replace",
-    index=False,
-)
-
-print("✓ fact_sip_inflows loaded")
-
-# ==========================================
-# FACT CATEGORY INFLOWS
-# ==========================================
-
-cat.to_sql(
-    "fact_category_inflows",
-    engine,
-    if_exists="replace",
-    index=False,
-)
-
-print("✓ fact_category_inflows loaded")
-
-# ==========================================
-# FACT INDUSTRY FOLIO
-# ==========================================
-
-folio.to_sql(
-    "fact_folio_count",
-    engine,
-    if_exists="replace",
-    index=False,
-)
-
-print("✓ fact_folio_count loaded")
-
-# ==========================================
-# FACT PORTFOLIO HOLDINGS
-# ==========================================
-
-portfolio.to_sql(
-    "fact_portfolio_holdings",
-    engine,
-    if_exists="replace",
-    index=False,
-)
-
-print("✓ fact_portfolio_holdings loaded")
-
-# ==========================================
-# FACT BENCHMARK
-# ==========================================
-
-benchmark.to_sql(
-    "fact_benchmark",
-    engine,
-    if_exists="replace",
-    index=False,
-)
-
-print("✓ fact_benchmark loaded")
-
-print("\n===================================")
-print(" STAR SCHEMA LOADED SUCCESSFULLY ")
-print("===================================")
+if __name__ == "__main__":
+    main()
